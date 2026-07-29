@@ -356,4 +356,121 @@ router.get('/device_status_log/ohlc/:device_id', async (req, res) => {
   }
 });
 
+// ============================================
+// PERSON DETECTION ENDPOINTS
+// ============================================
+
+// POST /gcam/common/report/person_detection - Log new detection from Pi
+router.post('/person_detection', async (req, res) => {
+  try {
+    const { device_id, imei, person_count, image_file, video_file, bounding_boxes } = req.body;
+
+    // Find device
+    let deviceQuery = 'SELECT id, imei, name, site_id FROM devices WHERE ';
+    let deviceParam;
+    if (device_id) {
+      deviceQuery += 'id = $1';
+      deviceParam = device_id;
+    } else if (imei) {
+      deviceQuery += 'imei = $1';
+      deviceParam = imei;
+    } else {
+      return res.status(400).json({ error: 'device_id or imei required' });
+    }
+
+    const deviceResult = await pool.query(deviceQuery, [deviceParam]);
+    if (deviceResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    const device = deviceResult.rows[0];
+
+    // Insert detection
+    const result = await pool.query(`
+      INSERT INTO person_detections (device_id, imei, person_count, image_file, video_file, bounding_boxes, detected_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      RETURNING *
+    `, [device.id, device.imei, person_count || 1, image_file, video_file, JSON.stringify(bounding_boxes || [])]);
+
+    res.json({ success: true, detection: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /gcam/common/report/person_detections/:device_id - Get detections for a device
+router.get('/person_detections/:device_id', async (req, res) => {
+  try {
+    const { device_id } = req.params;
+    const { date, limit = 100 } = req.query;
+    const isNumeric = /^\d+$/.test(device_id);
+
+    let query = `
+      SELECT
+        pd.id,
+        pd.device_id,
+        pd.imei,
+        pd.person_count,
+        pd.image_file,
+        pd.video_file,
+        pd.bounding_boxes,
+        pd.detected_at,
+        d.name as device_name,
+        s.name as site_name
+      FROM person_detections pd
+      JOIN devices d ON d.id = pd.device_id
+      LEFT JOIN sites s ON s.id = d.site_id
+      WHERE ${isNumeric ? 'pd.device_id = $1' : 'd.imei = $1'}
+    `;
+    const params = [isNumeric ? parseInt(device_id) : device_id];
+
+    if (date) {
+      query += ` AND DATE(pd.detected_at) = $2`;
+      params.push(date);
+    }
+
+    query += ` ORDER BY pd.detected_at DESC LIMIT $${params.length + 1}`;
+    params.push(parseInt(limit));
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /gcam/common/report/person_detections_grouped/:device_id - Group by hour
+router.get('/person_detections_grouped/:device_id', async (req, res) => {
+  try {
+    const { device_id } = req.params;
+    const { date } = req.query;
+    const isNumeric = /^\d+$/.test(device_id);
+
+    const targetDate = date || new Date().toISOString().split('T')[0];
+
+    const query = `
+      SELECT
+        EXTRACT(HOUR FROM pd.detected_at) as hour,
+        COUNT(*) as count,
+        MAX(pd.detected_at) as latest_time,
+        (SELECT image_file FROM person_detections
+         WHERE device_id = pd.device_id
+         AND DATE(detected_at) = $2
+         AND EXTRACT(HOUR FROM detected_at) = EXTRACT(HOUR FROM pd.detected_at)
+         ORDER BY detected_at DESC LIMIT 1) as thumbnail
+      FROM person_detections pd
+      JOIN devices d ON d.id = pd.device_id
+      WHERE ${isNumeric ? 'pd.device_id = $1' : 'd.imei = $1'}
+        AND DATE(pd.detected_at) = $2
+      GROUP BY pd.device_id, EXTRACT(HOUR FROM pd.detected_at)
+      ORDER BY hour DESC
+    `;
+
+    const result = await pool.query(query, [isNumeric ? parseInt(device_id) : device_id, targetDate]);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
