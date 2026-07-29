@@ -17,14 +17,16 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({
+const corsOptions = {
   origin: [
     'https://civicclean-ui.vercel.app',
     'http://localhost:3000',
     'http://localhost:3001',
   ],
   credentials: true,
-}));
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // preflight
 app.use(express.json());
 
 // Health check
