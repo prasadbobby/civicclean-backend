@@ -360,6 +360,14 @@ router.get('/device_status_log/ohlc/:device_id', async (req, res) => {
 // PERSON DETECTION ENDPOINTS
 // ============================================
 
+// ponytail: R2 URL builder
+const R2_BASE = process.env.R2_PUBLIC_URL || 'https://r2.prasadbobby.site';
+const buildR2Url = (imei, type, filename) => {
+  if (!filename) return null;
+  const folder = type === 'image' ? 'Image/Person_Image' : 'Video/Person_Video';
+  return `${R2_BASE}/gcam/${imei}/${folder}/${filename}`;
+};
+
 // POST /gcam/common/report/person_detection - Log new detection from Pi
 router.post('/person_detection', async (req, res) => {
   try {
@@ -433,7 +441,13 @@ router.get('/person_detections/:device_id', async (req, res) => {
     params.push(parseInt(limit));
 
     const result = await pool.query(query, params);
-    res.json(result.rows);
+    // ponytail: add full R2 URLs
+    const rows = result.rows.map(r => ({
+      ...r,
+      image_url: buildR2Url(r.imei, 'image', r.image_file),
+      video_url: buildR2Url(r.imei, 'video', r.video_file),
+    }));
+    res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
