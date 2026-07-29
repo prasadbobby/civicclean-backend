@@ -411,7 +411,8 @@ router.get('/person_detections/:device_id', async (req, res) => {
   try {
     const { device_id } = req.params;
     const { date, limit = 100 } = req.query;
-    const isNumeric = /^\d+$/.test(device_id);
+    // ponytail: IMEI is 15+ digits, too big for int. Only treat as device_id if short number
+    const isDeviceId = /^\d+$/.test(device_id) && device_id.length <= 9;
 
     let query = `
       SELECT
@@ -428,9 +429,9 @@ router.get('/person_detections/:device_id', async (req, res) => {
       FROM person_detections pd
       JOIN devices d ON d.id = pd.device_id
       LEFT JOIN sites s ON s.id = d.site_id
-      WHERE ${isNumeric ? 'pd.device_id = $1' : 'd.imei = $1'}
+      WHERE ${isDeviceId ? 'pd.device_id = $1' : 'd.imei = $1'}
     `;
-    const params = [isNumeric ? parseInt(device_id) : device_id];
+    const params = [isDeviceId ? parseInt(device_id) : device_id];
 
     if (date) {
       query += ` AND DATE(pd.detected_at) = $2`;
@@ -458,7 +459,7 @@ router.get('/person_detections_grouped/:device_id', async (req, res) => {
   try {
     const { device_id } = req.params;
     const { date } = req.query;
-    const isNumeric = /^\d+$/.test(device_id);
+    const isDeviceId = /^\d+$/.test(device_id) && device_id.length <= 9;
 
     const targetDate = date || new Date().toISOString().split('T')[0];
 
@@ -474,13 +475,13 @@ router.get('/person_detections_grouped/:device_id', async (req, res) => {
          ORDER BY detected_at DESC LIMIT 1) as thumbnail
       FROM person_detections pd
       JOIN devices d ON d.id = pd.device_id
-      WHERE ${isNumeric ? 'pd.device_id = $1' : 'd.imei = $1'}
+      WHERE ${isDeviceId ? 'pd.device_id = $1' : 'd.imei = $1'}
         AND DATE(pd.detected_at) = $2
       GROUP BY pd.device_id, EXTRACT(HOUR FROM pd.detected_at)
       ORDER BY hour DESC
     `;
 
-    const result = await pool.query(query, [isNumeric ? parseInt(device_id) : device_id, targetDate]);
+    const result = await pool.query(query, [isDeviceId ? parseInt(device_id) : device_id, targetDate]);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
