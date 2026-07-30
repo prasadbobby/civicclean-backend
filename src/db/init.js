@@ -88,7 +88,8 @@ CREATE TABLE IF NOT EXISTS user_organization_access (
     inner_role_id INTEGER,
     access TEXT DEFAULT 'ALL',
     devices TEXT DEFAULT 'ALL',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, organization_id)
 );
 
 -- User wishlist table
@@ -126,6 +127,13 @@ CREATE INDEX IF NOT EXISTS idx_org_roles_org ON organization_roles(organization_
 CREATE INDEX IF NOT EXISTS idx_orgs_name_search ON organizations(lower(name));
 CREATE INDEX IF NOT EXISTS idx_user_org_user ON user_organization_access(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_org_org ON user_organization_access(organization_id);
+
+-- ponytail: add unique constraint if not exists (for existing databases)
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_organization_access_user_id_organization_id_key') THEN
+    ALTER TABLE user_organization_access ADD CONSTRAINT user_organization_access_user_id_organization_id_key UNIQUE(user_id, organization_id);
+  END IF;
+END $$;
 `;
 
 async function init() {

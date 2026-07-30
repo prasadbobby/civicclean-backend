@@ -210,6 +210,7 @@ router.get('/user/:id/organizations', async (req, res) => {
 });
 
 // GET /web/client/device/viewall/:user_id - List user's devices (per docs)
+// ponytail: respects access=ALL|SPECIFIC and devices=ALL|comma-separated IDs
 router.get('/device/viewall/:user_id', async (req, res) => {
   try {
     const { user_id } = req.params;
@@ -242,6 +243,32 @@ router.get('/device/viewall/:user_id', async (req, res) => {
         ORDER BY d.name
       `);
     } else {
+      // Get user's org access with device restrictions
+      const accessResult = await pool.query(`
+        SELECT organization_id, access, devices
+        FROM user_organization_access
+        WHERE user_id = $1
+      `, [user_id]);
+
+      if (accessResult.rows.length === 0) {
+        return res.json([]);
+      }
+
+      // Build device filter
+      const orgIds = [];
+      const specificDeviceIds = [];
+
+      for (const row of accessResult.rows) {
+        if (row.access === 'ALL' || row.devices === 'ALL') {
+          orgIds.push(row.organization_id);
+        } else if (row.devices) {
+          // SPECIFIC access - collect device IDs
+          const ids = row.devices.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+          specificDeviceIds.push(...ids);
+        }
+      }
+
+      // Query: devices from ALL-access orgs OR specific device IDs
       result = await pool.query(`
         SELECT d.*,
           json_build_object('id', s.id, 'name', s.name) as site,
@@ -259,10 +286,10 @@ router.get('/device/viewall/:user_id', async (req, res) => {
         LEFT JOIN sites s ON s.id = d.site_id
         LEFT JOIN organizations o ON o.id = d.organization_id
         LEFT JOIN device_logs dl ON dl.device_id = d.id
-        JOIN user_organization_access uoa ON uoa.organization_id = d.organization_id
-        WHERE d.is_deleted = false AND uoa.user_id = $1
+        WHERE d.is_deleted = false
+          AND (d.organization_id = ANY($1) OR d.id = ANY($2))
         ORDER BY d.name
-      `, [user_id]);
+      `, [orgIds, specificDeviceIds]);
     }
 
     res.json(result.rows);
@@ -351,6 +378,171 @@ router.post('/wishlist/remove_device_from_wishlist', async (req, res) => {
     }
 
     res.json({ success: true, message: 'Removed from wishlist' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============ Device Assignment API ============
+
+// GET /gcam/client/users - List all users (admin only)
+router.get('/users', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, username, fullname, mobile, role, created_at
+      FROM users
+      ORDER BY fullname, username
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /gcam/client/user/:id/device-access - Get user's device access settings
+router.get('/user/:id/device-access', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(`
+      SELECT
+        uoa.id,
+        uoa.organization_id,
+        o.name as organization_name,
+        uoa.org_role,
+        uoa.access,
+        uoa.devices
+      FROM user_organization_access uoa
+      JOIN organizations o ON o.id = uoa.organization_id
+      WHERE uoa.user_id = $1
+    `, [id]);
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /gcam/client/user/assign-org - Assign user to organization
+router.post('/user/assign-org', async (req, res) => {
+  try {
+    const { user_id, organization_id, org_role, access, devices } = req.body;
+
+    if (!user_id || !organization_id) {
+      return res.status(400).json({ error: 'user_id and organization_id required' });
+    }
+
+    // ponytail: upsert - insert or update if exists
+    const result = await pool.query(`
+      INSERT INTO user_organization_access (user_id, organization_id, org_role, access, devices)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (user_id, organization_id) DO UPDATE SET
+        org_role = EXCLUDED.org_role,
+        access = EXCLUDED.access,
+        devices = EXCLUDED.devices
+      RETURNING *
+    `, [user_id, organization_id, org_role || 'USER', access || 'ALL', devices || 'ALL']);
+
+    res.json({ success: true, access: result.rows[0] });
+  } catch (err) {
+    // Handle case where unique constraint doesn't exist
+    if (err.code === '42P10') {
+      // Try simple insert/update
+      try {
+        const existing = await pool.query(
+          'SELECT id FROM user_organization_access WHERE user_id = $1 AND organization_id = $2',
+          [req.body.user_id, req.body.organization_id]
+        );
+
+        let result;
+        if (existing.rows.length > 0) {
+          result = await pool.query(`
+            UPDATE user_organization_access
+            SET org_role = $3, access = $4, devices = $5
+            WHERE user_id = $1 AND organization_id = $2
+            RETURNING *
+          `, [req.body.user_id, req.body.organization_id, req.body.org_role || 'USER', req.body.access || 'ALL', req.body.devices || 'ALL']);
+        } else {
+          result = await pool.query(`
+            INSERT INTO user_organization_access (user_id, organization_id, org_role, access, devices)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+          `, [req.body.user_id, req.body.organization_id, req.body.org_role || 'USER', req.body.access || 'ALL', req.body.devices || 'ALL']);
+        }
+        return res.json({ success: true, access: result.rows[0] });
+      } catch (e) {
+        return res.status(500).json({ error: e.message });
+      }
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /gcam/client/user/remove-org - Remove user from organization
+router.delete('/user/remove-org', async (req, res) => {
+  try {
+    const { user_id, organization_id } = req.body;
+
+    if (!user_id || !organization_id) {
+      return res.status(400).json({ error: 'user_id and organization_id required' });
+    }
+
+    await pool.query(
+      'DELETE FROM user_organization_access WHERE user_id = $1 AND organization_id = $2',
+      [user_id, organization_id]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /gcam/client/user/update-devices - Update specific device access
+router.post('/user/update-devices', async (req, res) => {
+  try {
+    const { user_id, organization_id, device_ids } = req.body;
+
+    if (!user_id || !organization_id) {
+      return res.status(400).json({ error: 'user_id and organization_id required' });
+    }
+
+    // device_ids: array of device IDs or 'ALL'
+    const devicesStr = Array.isArray(device_ids) ? device_ids.join(',') : (device_ids || 'ALL');
+    const accessType = devicesStr === 'ALL' ? 'ALL' : 'SPECIFIC';
+
+    const result = await pool.query(`
+      UPDATE user_organization_access
+      SET access = $3, devices = $4
+      WHERE user_id = $1 AND organization_id = $2
+      RETURNING *
+    `, [user_id, organization_id, accessType, devicesStr]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User organization access not found' });
+    }
+
+    res.json({ success: true, access: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /gcam/client/organization/:id/devices - List org devices for assignment
+router.get('/organization/:id/devices', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(`
+      SELECT d.id, d.imei, d.name, d.is_active,
+        json_build_object('id', s.id, 'name', s.name) as site
+      FROM devices d
+      LEFT JOIN sites s ON s.id = d.site_id
+      WHERE d.organization_id = $1 AND d.is_deleted = false
+      ORDER BY d.name
+    `, [id]);
+
+    res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

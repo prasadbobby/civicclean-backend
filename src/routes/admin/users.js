@@ -3,6 +3,12 @@ import pool from '../../db/pool.js';
 
 const router = Router();
 
+// ponytail: helper to parse devices string to array
+function parseDevices(devices) {
+  if (!devices || devices === 'ALL') return 'ALL';
+  return devices.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+}
+
 // GET /web/admin/user_manage/viewall
 router.get('/viewall', async (req, res) => {
   try {
@@ -29,7 +35,10 @@ router.get('/viewall', async (req, res) => {
 
     const users = result.rows.map(u => ({
       ...u,
-      organizations: u.role === 'SUPERADMIN' ? 'ALL' : u.organizations
+      organizations: u.role === 'SUPERADMIN' ? 'ALL' : u.organizations.map(org => ({
+        ...org,
+        devices: parseDevices(org.devices)
+      }))
     }));
 
     res.json(users);
@@ -70,7 +79,10 @@ router.get('/:id', async (req, res) => {
     const user = result.rows[0];
     res.json({
       ...user,
-      organizations: user.role === 'SUPERADMIN' ? 'ALL' : user.organizations
+      organizations: user.role === 'SUPERADMIN' ? 'ALL' : user.organizations.map(org => ({
+        ...org,
+        devices: parseDevices(org.devices)
+      }))
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -97,10 +109,12 @@ router.post('/create', async (req, res) => {
     // Add organization access if provided
     if (organizations && Array.isArray(organizations)) {
       for (const org of organizations) {
+        // ponytail: convert array to comma-separated string for storage
+        const devicesStr = Array.isArray(org.devices) ? org.devices.join(',') : (org.devices || 'ALL');
         await pool.query(`
           INSERT INTO user_organization_access (user_id, organization_id, org_role, access, devices)
           VALUES ($1, $2, $3, $4, $5)
-        `, [user.id, org.organization_id, org.org_role || 'ADMIN', org.access || 'ALL', org.devices || 'ALL']);
+        `, [user.id, org.organization_id, org.org_role || 'ADMIN', org.access || 'ALL', devicesStr]);
       }
     }
 
@@ -139,10 +153,11 @@ router.put('/update/:id', async (req, res) => {
     if (organizations && Array.isArray(organizations)) {
       await pool.query('DELETE FROM user_organization_access WHERE user_id = $1', [id]);
       for (const org of organizations) {
+        const devicesStr = Array.isArray(org.devices) ? org.devices.join(',') : (org.devices || 'ALL');
         await pool.query(`
           INSERT INTO user_organization_access (user_id, organization_id, org_role, access, devices)
           VALUES ($1, $2, $3, $4, $5)
-        `, [id, org.organization_id, org.org_role || 'ADMIN', org.access || 'ALL', org.devices || 'ALL']);
+        `, [id, org.organization_id, org.org_role || 'ADMIN', org.access || 'ALL', devicesStr]);
       }
     }
 

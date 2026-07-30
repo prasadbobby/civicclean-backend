@@ -91,20 +91,18 @@ router.get('/list/not-registered/devices', async (req, res) => {
 });
 
 // GET /gcam/common/list/owned/devices/for/user/:id
+// ponytail: respects access=ALL|SPECIFIC and devices=ALL|comma-separated IDs
 router.get('/list/owned/devices/for/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Check if user is superadmin
     const userResult = await pool.query('SELECT role FROM users WHERE id = $1', [id]);
     if (userResult.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const user = userResult.rows[0];
-
     let result;
-    if (user.role === 'SUPERADMIN') {
+    if (userResult.rows[0].role === 'SUPERADMIN') {
       result = await pool.query(`
         SELECT d.*,
           json_build_object('id', s.id, 'name', s.name) as site,
@@ -116,6 +114,28 @@ router.get('/list/owned/devices/for/user/:id', async (req, res) => {
         ORDER BY d.name
       `);
     } else {
+      // Get user's org access with device restrictions
+      const accessResult = await pool.query(`
+        SELECT organization_id, access, devices
+        FROM user_organization_access WHERE user_id = $1
+      `, [id]);
+
+      if (accessResult.rows.length === 0) {
+        return res.json([]);
+      }
+
+      const orgIds = [];
+      const specificDeviceIds = [];
+
+      for (const row of accessResult.rows) {
+        if (row.access === 'ALL' || row.devices === 'ALL') {
+          orgIds.push(row.organization_id);
+        } else if (row.devices) {
+          const ids = row.devices.split(',').map(i => parseInt(i.trim())).filter(i => !isNaN(i));
+          specificDeviceIds.push(...ids);
+        }
+      }
+
       result = await pool.query(`
         SELECT d.*,
           json_build_object('id', s.id, 'name', s.name) as site,
@@ -123,10 +143,10 @@ router.get('/list/owned/devices/for/user/:id', async (req, res) => {
         FROM devices d
         LEFT JOIN sites s ON s.id = d.site_id
         LEFT JOIN organizations o ON o.id = d.organization_id
-        JOIN user_organization_access uoa ON uoa.organization_id = d.organization_id
-        WHERE d.is_deleted = false AND uoa.user_id = $1
+        WHERE d.is_deleted = false
+          AND (d.organization_id = ANY($1) OR d.id = ANY($2))
         ORDER BY d.name
-      `, [id]);
+      `, [orgIds, specificDeviceIds]);
     }
 
     res.json(result.rows);
