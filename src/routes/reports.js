@@ -368,6 +368,27 @@ const buildR2Url = (imei, type, filename) => {
   return `${R2_BASE}/gcam/${imei}/${folder}/${filename}`;
 };
 
+// POST /gcam/common/report/heartbeat - Mark device online
+router.post('/heartbeat', async (req, res) => {
+  try {
+    const { imei, device_id } = req.body;
+    const identifier = imei || device_id;
+    if (!identifier) {
+      return res.status(400).json({ error: 'imei or device_id required' });
+    }
+
+    // ponytail: update last_seen, add column if missing (safe upsert pattern)
+    await pool.query(`
+      UPDATE devices SET last_seen = NOW(), status = 'active'
+      WHERE imei = $1 OR id::text = $1
+    `, [identifier]);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /gcam/common/report/person_detection - Log new detection from Pi
 router.post('/person_detection', async (req, res) => {
   try {
@@ -392,6 +413,9 @@ router.post('/person_detection', async (req, res) => {
     }
 
     const device = deviceResult.rows[0];
+
+    // ponytail: also mark device online on detection
+    await pool.query(`UPDATE devices SET last_seen = NOW(), status = 'active' WHERE id = $1`, [device.id]);
 
     // Insert detection
     const result = await pool.query(`
