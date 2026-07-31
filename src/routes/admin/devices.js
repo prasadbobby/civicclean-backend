@@ -219,4 +219,46 @@ router.delete('/permanent/delete/:id', async (req, res) => {
   }
 });
 
+// PUT /web/admin/device/zone/:id - ponytail: save alert zone polygon
+router.put('/zone/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { alert_zone } = req.body; // array of {x, y} points (percentages)
+
+    const result = await pool.query(`
+      UPDATE devices
+      SET alert_zone = $1, updated_at = NOW()
+      WHERE id = $2 AND is_deleted = false
+      RETURNING id, imei, alert_zone
+    `, [JSON.stringify(alert_zone), id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    res.json({ success: true, device: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /web/admin/device/zone/:imei - ponytail: get zone by IMEI (for Pi)
+router.get('/zone/:imei', async (req, res) => {
+  try {
+    const { imei } = req.params;
+
+    const result = await pool.query(`
+      SELECT alert_zone FROM devices WHERE imei = $1 AND is_deleted = false
+    `, [imei]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    res.json({ alert_zone: result.rows[0].alert_zone });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

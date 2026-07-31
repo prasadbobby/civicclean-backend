@@ -45,9 +45,21 @@ CREATE TABLE IF NOT EXISTS devices (
     site_id INTEGER REFERENCES sites(id) ON DELETE SET NULL,
     organization_id INTEGER REFERENCES organizations(id) ON DELETE SET NULL,
     max_count INTEGER DEFAULT 10,
+    alert_zone JSONB,
+    live_stream_url TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- ponytail: add columns if not exist (for existing databases)
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'devices' AND column_name = 'alert_zone') THEN
+    ALTER TABLE devices ADD COLUMN alert_zone JSONB;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'devices' AND column_name = 'live_stream_url') THEN
+    ALTER TABLE devices ADD COLUMN live_stream_url TEXT;
+  END IF;
+END $$;
 
 -- Device logs table (latest log per device)
 CREATE TABLE IF NOT EXISTS device_logs (
